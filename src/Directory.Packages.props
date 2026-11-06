@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="AngleSharp" Version="1.9.1" />
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageVersion Include="Serilog" Version="4.2.0" />
+    <PackageVersion Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+    <PackageVersion Include="Velopack" Version="1.2.161" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,74 @@
+name: Build XIVLauncherKR
+on: [push, pull_request]
+concurrency: build_xl_kr
+
+jobs:
+  build-release:
+    name: Build Release on Windows
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Install VPK
+        run: dotnet tool install -g vpk
+      - name: Publish XIVLauncherKR
+        run: |
+          cd src/XIVLauncher
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          dotnet publish --self-contained false -c Release -r win-x64 -o publish "-p:Version=$version"
+      - name: Generate Hashes File
+        run: ./scripts/CreateHashList.ps1 ./src/XIVLauncher/publish
+      - name: Build Velopack Release
+        id: build-velopack
+        run: |
+          cd src/XIVLauncher
+          $refver = $env:GITHUB_REF_NAME -replace '^v', ''
+          "version=$refver" >> $env:GITHUB_OUTPUT
+          vpk pack -u XIVLauncherKR -v $refver -p ./publish -e FFXIVLauncherKR.exe `
+            -i ./Resources/dalamud_icon.ico --framework net10.0-x64-desktop `
+            --releaseNotes ../../RELEASE.md --noPortable
+      - name: Upload release assets
+        uses: softprops/action-gh-release@aec2ec56f94eb8180ceec724245f64ef008b89f5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: ./src/XIVLauncher/Releases/**
+          name: Release ${{ steps.build-velopack.outputs.version }}
+          body_path: RELEASE.md
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+      - name: Publish release
+        uses: softprops/action-gh-release@aec2ec56f94eb8180ceec724245f64ef008b89f5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  build:
+    name: Build on Windows
+    runs-on: windows-2022
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish XIVLauncherKR
+        run: |
+          cd src/XIVLauncher
+          dotnet publish --self-contained false -c Release -r win-x64 -o publish
+      - name: Generate Hashes File
+        run: ./scripts/CreateHashList.ps1 ./src/XIVLauncher/publish/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xivlauncherkr-artifact
+          path: src/XIVLauncher/publish/

@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/XIVLauncher.Common/XIVLauncher.Common.csproj" />
+  <Project Path="src/XIVLauncher.Common.Windows/XIVLauncher.Common.Windows.csproj" />
+  <Project Path="src/XIVLauncher/XIVLauncher.csproj" />
+</Solution>

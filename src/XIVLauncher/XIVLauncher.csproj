@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>FFXIVLauncherKR</AssemblyName>
+    <Product>FFXIVLauncherKR</Product>
+    <Version>0.2.0</Version>
+    <StartupObject>XIVLauncher.Program</StartupObject>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <ApplicationIcon>Resources/dalamud_icon.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Velopack" />
+    <PackageReference Include="Microsoft.Web.WebView2" />
+    <ApplicationDefinition Include="App.xaml" />
+    <Page Include="Windows/MainWindow.xaml" />
+    <Compile Include="Program.cs" />
+    <Compile Include="App.xaml.cs" />
+    <Compile Include="LauncherUpdater.cs" />
+    <Compile Include="Windows/LauncherUpdateWindow.cs" />
+    <Compile Include="Windows/MainWindow.xaml.cs" />
+    <Compile Include="Windows/NaverLoginWindow.cs" />
+    <Compile Include="Windows/OtpWindow.cs" />
+    <Resource Include="Resources/dalamud_icon.ico" />
+    <None Include="../../LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+    <EmbeddedResource Include="../../LICENSE" LogicalName="FFXIVLauncherKR.LICENSE" />
+    <ProjectReference Include="../XIVLauncher.Common/XIVLauncher.Common.csproj" />
+    <ProjectReference Include="../XIVLauncher.Common.Windows/XIVLauncher.Common.Windows.csproj" />
+  </ItemGroup>
+</Project>

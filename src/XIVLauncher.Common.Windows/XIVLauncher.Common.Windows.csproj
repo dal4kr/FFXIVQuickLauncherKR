@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="NativeAclFix.cs" />
+    <Compile Include="WindowsGameRunner.cs" />
+    <Compile Include="KrDalamudGameRunner.cs" />
+    <PackageReference Include="Serilog" />
+    <ProjectReference Include="../XIVLauncher.Common/XIVLauncher.Common.csproj" />
+  </ItemGroup>
+</Project>
