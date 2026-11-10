@@ -4,7 +4,7 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>FFXIVLauncherKR</AssemblyName>
     <Product>FFXIVLauncherKR</Product>
-    <Version>0.2.0</Version>
+    <Version>0.2.1</Version>
     <StartupObject>XIVLauncher.Program</StartupObject>
     <EnableDefaultItems>false</EnableDefaultItems>
     <ApplicationIcon>Resources/dalamud_icon.ico</ApplicationIcon>

@@ -21,6 +21,8 @@ public sealed class GameLaunchPlan
 
     public static GameLaunchPlan Create(string gameDirectory, LauncherSession session)
     {
+        if (session.IsPatchOnly)
+            throw new LauncherException("사전 패치 기간에는 게임을 실행할 수 없습니다. 점검 종료 후 접속 상태를 새로고침해 주세요.", "PREPATCH");
         if (!LauncherSession.HasValidTokenFormat(session.Token))
             throw new LauncherException("게임 세션 형식이 올바르지 않습니다. 다시 로그인해 주세요.");
         if (string.IsNullOrWhiteSpace(gameDirectory))

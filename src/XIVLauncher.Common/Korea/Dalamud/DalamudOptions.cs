@@ -14,6 +14,7 @@ public sealed class DalamudOptions
     public string LocalBuildDirectory { get; set; } = "";
     public string LocalBuildGameVersion { get; set; } = "";
     public bool NoPlugins { get; set; }
+    public bool IgnoreGameVersion { get; set; }
     public int InjectionDelayMs { get; set; }
 }
 

@@ -61,6 +61,7 @@ public partial class MainWindow : Window
 
     private void ReloadSettings()
     {
+        authentication.ClearPendingSession();
         var previous = initialized;
         initialized = false;
         try
@@ -79,6 +80,7 @@ public partial class MainWindow : Window
             LocalDalamudDirectory.Text = options.LocalBuildDirectory;
             LocalDalamudGameVersion.Text = options.LocalBuildGameVersion;
             DalamudNoPlugins.IsChecked = options.NoPlugins;
+            DalamudIgnoreGameVersion.IsChecked = options.IgnoreGameVersion;
             DalamudDelay.Text = options.InjectionDelayMs.ToString(System.Globalization.CultureInfo.InvariantCulture);
             account = null;
             session = null;
@@ -119,13 +121,17 @@ public partial class MainWindow : Window
 
     private void UpdateControls()
     {
+        var patchOnly = session?.IsPatchOnly == true;
         LoginPanel.Visibility = session is not null ? Visibility.Collapsed : Visibility.Visible;
         ActozLoginPanel.Visibility = SelectedProvider == LoginProvider.Actoz ? Visibility.Visible : Visibility.Collapsed;
         NaverLoginHint.Visibility = SelectedProvider == LoginProvider.Naver ? Visibility.Visible : Visibility.Collapsed;
         LoginProviderPicker.IsEnabled = !busy;
-        SessionSummary.Text = account is null ? "로그인되어 있지 않습니다." : $"{account.DisplayName} · {(session is null ? "로그인 필요" : "실행 준비됨")}";
-        SessionDate.Text = session is null ? "로그인하면 게임을 실행할 수 있습니다." : $"세션 발급: {session.IssuedAtUtc.ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm} (KST)";
-        LaunchButton.Content = session is not null ? "게임 실행" : SelectedProvider == LoginProvider.Naver ? "네이버 로그인" : "로그인";
+        SessionSummary.Text = patchOnly ? $"{session!.UserName} · 사전 패치 로그인" : account is null ? "로그인되어 있지 않습니다." : $"{account.DisplayName} · {(session is null ? "로그인 필요" : "실행 준비됨")}";
+        var patchHint = authentication.CanRefreshSession
+            ? "현재는 사전 패치만 가능합니다. 점검이 끝나면 접속 상태를 새로고침해 주세요."
+            : "현재 로그인 인증 정보가 없습니다. 새로 로그인해 주세요.";
+        SessionDate.Text = patchOnly ? patchHint : session is null ? "로그인하면 게임을 실행할 수 있습니다." : $"세션 발급: {session.IssuedAtUtc.ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm} (KST)";
+        LaunchButton.Content = patchOnly ? "게임 설치 / 업데이트" : session is not null ? "게임 실행" : SelectedProvider == LoginProvider.Naver ? "네이버 로그인" : "로그인";
         AccountPicker.IsEnabled = !busy;
         AddAccountButton.IsEnabled = !busy;
         CheckGameUpdateButton.IsEnabled = !busy;
@@ -134,11 +140,13 @@ public partial class MainWindow : Window
         LaunchButton.IsEnabled = !busy && (session is not null || SelectedProvider == LoginProvider.Naver || challengeReady);
         BrowseButton.IsEnabled = !busy;
         NewLoginButton.IsEnabled = !busy;
+        RefreshSessionButton.Visibility = patchOnly ? Visibility.Visible : Visibility.Collapsed;
+        RefreshSessionButton.IsEnabled = !busy && patchOnly && authentication.CanRefreshSession;
         DeleteSessionButton.IsEnabled = !busy && account is not null;
         RefreshCaptchaButton.IsEnabled = !busy;
         GameDirectory.IsEnabled = !busy;
         LoginPanel.IsEnabled = !busy;
-        SaveSession.IsEnabled = !busy;
+        SaveSession.IsEnabled = !busy && !patchOnly;
         AutoLaunch.IsEnabled = !busy;
         CreateBackupButton.IsEnabled = !busy;
         RestoreBackupButton.IsEnabled = !busy;
@@ -193,6 +201,7 @@ public partial class MainWindow : Window
 
     private Task PrepareLoginAsync()
     {
+        authentication.ClearPendingSession();
         if (SelectedProvider == LoginProvider.Actoz) return LoadCaptchaAsync();
         challengeReady = false;
         CaptchaImage.Source = null;
@@ -260,6 +269,7 @@ public partial class MainWindow : Window
     private async void AccountSelection_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (!initialized || busy || AccountPicker.SelectedItem is not StoredAccount selected) return;
+        authentication.ClearPendingSession();
         account = selected;
         session = account.RestoreSession();
         UserName.Text = account.UserName;
@@ -304,6 +314,24 @@ public partial class MainWindow : Window
         UserName.Focus();
     }
 
+    private async void RefreshSession_Click(object sender, RoutedEventArgs e)
+    {
+        await RunBusyAsync(async () =>
+        {
+            if (session?.IsPatchOnly != true) return;
+            Status.Text = "게임 접속 가능 여부를 확인하는 중입니다…";
+            session = await authentication.RefreshSessionAsync(closing.Token);
+            if (session.IsPatchOnly)
+            {
+                Status.Text = "아직 서버 점검 중입니다. 잠시 후 접속 상태를 다시 새로고침해 주세요.";
+                return;
+            }
+            RememberAccount();
+            SaveSettings();
+            Status.Text = "게임에 접속할 준비가 되었습니다. 게임 실행 버튼을 눌러 주세요.";
+        });
+    }
+
     private async void DeleteSession_Click(object sender, RoutedEventArgs e)
     {
         await RunBusyAsync(async () =>
@@ -337,7 +365,7 @@ public partial class MainWindow : Window
 
     private void RememberAccount()
     {
-        if (session is null) return;
+        if (session is null || session.IsPatchOnly) return;
         account = StoredAccount.FromSession(session);
         PersistAccount();
     }
@@ -420,6 +448,7 @@ public partial class MainWindow : Window
             LocalBuildDirectory = LocalDalamudDirectory.Text.Trim(),
             LocalBuildGameVersion = LocalDalamudGameVersion.Text.Trim(),
             NoPlugins = DalamudNoPlugins.IsChecked == true,
+            IgnoreGameVersion = DalamudIgnoreGameVersion.IsChecked == true,
             InjectionDelayMs = validDelay ? delay : 0,
         };
         if (validate && (options.Enabled || manualInjection) && options.UseLocalBuild &&
@@ -562,7 +591,16 @@ public partial class MainWindow : Window
                 finally { Password.Clear(); }
                 RememberAccount();
                 SaveSettings();
-                Status.Text = "로그인했습니다. 게임 실행 버튼을 눌러 주세요.";
+                if (session.IsPatchOnly)
+                {
+                    var check = await gameUpdater.CheckAsync(GetGameDirectory(), cancellationToken: closing.Token);
+                    ShowGameUpdate(check);
+                    if (check.NeedsUpdate) MainTabs.SelectedItem = GameUpdateTab;
+                    Status.Text = check.NeedsUpdate
+                        ? "로그인했습니다. 사전 패치를 진행할 수 있습니다. 점검 종료 후 접속 상태를 새로고침해 주세요."
+                        : "사전 패치 로그인 상태이며 게임 파일이 최신 버전입니다. 점검 종료 후 접속 상태를 새로고침해 주세요.";
+                }
+                else Status.Text = "로그인했습니다. 게임 실행 버튼을 눌러 주세요.";
                 return;
             }
             await StartGameAsync();
@@ -573,9 +611,14 @@ public partial class MainWindow : Window
     {
         if (session is null) throw new LauncherException("먼저 로그인해 주세요.");
         var gameDirectory = GetGameDirectory();
-        var options = GetDalamudOptions(validate: true);
         SaveSettings();
         if (!await EnsureGameReadyAsync(session)) return;
+        if (session.IsPatchOnly)
+        {
+            Status.Text = "게임 파일이 최신 버전입니다. 점검 종료 후 접속 상태를 새로고침해 주세요.";
+            return;
+        }
+        var options = GetDalamudOptions(validate: true);
         var plan = GameLaunchPlan.Create(gameDirectory, session);
         PreparedDalamud? prepared = null;
         string? withoutDalamud = null;
@@ -829,6 +872,14 @@ public partial class MainWindow : Window
     {
         if (!initialized) return;
         UpdateControls();
+    }
+
+    private void DalamudVersionCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!initialized || busy) return;
+        try { SaveSettings(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { ShowError("Dalamud 버전 검사 설정을 저장하지 못했습니다. 저장 폴더의 권한을 확인해 주세요."); }
     }
 
     private void DalamudLoadMethod_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)

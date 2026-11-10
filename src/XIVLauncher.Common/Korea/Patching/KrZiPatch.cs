@@ -71,7 +71,8 @@ internal static class KrZiPatch
             file.Position += size + 4; // data followed by CRC
             if (header[4] == 'E' && header[5] == 'O' && header[6] == 'F' && header[7] == '_')
             {
-                if (size != 0 || file.Position != file.Length) throw new InvalidDataException("ZiPatch 끝 표시 뒤에 예기치 않은 데이터가 있습니다.");
+                // EOF_ may carry a payload; it is already included in the frame length and CRC.
+                if (file.Position != file.Length) throw new InvalidDataException("ZiPatch 끝 표시 뒤에 예기치 않은 데이터가 있습니다.");
                 return;
             }
         }

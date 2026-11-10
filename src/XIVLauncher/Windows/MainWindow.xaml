@@ -101,6 +101,7 @@
                 <TextBlock x:Name="SessionSummary" Text="저장된 세션이 없습니다." Margin="0,7,0,0" TextWrapping="Wrap" />
                 <TextBlock x:Name="SessionDate" Foreground="{StaticResource Muted}" Margin="0,3,0,0" TextWrapping="Wrap" />
                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                  <Button x:Name="RefreshSessionButton" Content="접속 상태 새로고침" Click="RefreshSession_Click" Margin="0,0,8,0" Visibility="Collapsed" />
                   <Button x:Name="NewLoginButton" Content="새로 로그인" Click="NewLogin_Click" Margin="0,0,8,0" />
                   <Button x:Name="DeleteSessionButton" Content="계정 삭제" Click="DeleteSession_Click" />
                 </StackPanel>
@@ -217,6 +218,9 @@
                       <ComboBoxItem Content="EntryPoint (게임 시작 단계에서 연결)" Tag="{x:Static dalamud:DalamudLoadMethod.EntryPoint}" />
                     </ComboBox>
                     <CheckBox x:Name="DalamudNoPlugins" Content="플러그인 없이 Dalamud 시작" Margin="0,0,0,9" />
+                    <CheckBox x:Name="DalamudIgnoreGameVersion" Content="지원 게임 버전 검사 무시" IsChecked="False" Margin="0,0,0,9"
+                              ToolTip="지원 버전이 달라도 Dalamud 연결을 시도합니다. 호환되지 않으면 게임이 종료될 수 있습니다."
+                              Checked="DalamudVersionCheck_Changed" Unchecked="DalamudVersionCheck_Changed" />
                     <StackPanel Orientation="Horizontal">
                       <TextBlock Text="초기화 지연(ms)" VerticalAlignment="Center" Margin="0,0,10,0" />
                       <TextBox x:Name="DalamudDelay" Width="90" MaxLength="5" AutomationProperties.Name="Dalamud 초기화 지연" />

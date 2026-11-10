@@ -12,6 +12,9 @@ public sealed class ActozAuthenticationClient : IDisposable
     private readonly bool ownsClient;
     private readonly CookieContainer? cookieJar;
     private Dictionary<string, string>? form;
+    private (LauncherSession Session, Dictionary<string, string> Fields)? pendingSession;
+    public bool CanRefreshSession => pendingSession is not null;
+
     public ActozAuthenticationClient() : this(new CookieContainer()) { }
 
     private ActozAuthenticationClient(CookieContainer cookies) : this(new HttpClient(new HttpClientHandler
@@ -33,6 +36,7 @@ public sealed class ActozAuthenticationClient : IDisposable
 
     public async Task<LoginChallenge> PrepareAsync(CancellationToken cancellationToken = default)
     {
+        ClearPendingSession();
         form?.Clear();
         form = null;
         var page = await ReadLoginPageAsync(cancellationToken);
@@ -67,6 +71,7 @@ public sealed class ActozAuthenticationClient : IDisposable
     public async Task<LauncherSession> LoginNaverAsync(NaverLoginIdentity identity, CancellationToken cancellationToken = default,
         Func<string?, CancellationToken, Task<string?>>? requestOtp = null, IEnumerable<Cookie>? browserCookies = null)
     {
+        ClearPendingSession();
         form?.Clear();
         form = null;
         if (string.IsNullOrWhiteSpace(identity.MemberId) || identity.MemberId.Length > 1024 || identity.MemberId.Any(char.IsControl))
@@ -93,6 +98,7 @@ public sealed class ActozAuthenticationClient : IDisposable
     public async Task<LauncherSession> LoginAsync(string userName, string password, string captcha, CancellationToken cancellationToken = default,
         Func<string?, CancellationToken, Task<string?>>? requestOtp = null)
     {
+        ClearPendingSession();
         var fields = form ?? throw new LauncherException("로그인 화면을 먼저 불러와 주세요.");
         form = null;
         userName = userName.Trim();
@@ -116,8 +122,6 @@ public sealed class ActozAuthenticationClient : IDisposable
         {
             using var login = await PostAsync("LauncherFF/LauncherProcess", fields, cancellationToken);
             var data = login.RootElement;
-            if (Read(data, "systemCheck") == "O")
-                throw new LauncherException("서버 점검 중입니다. 점검 종료 후 다시 시도해 주세요.", "MAINTENANCE");
             var result = Read(data, "result");
             if (result != "0")
                 throw LoginError(result);
@@ -133,6 +137,9 @@ public sealed class ActozAuthenticationClient : IDisposable
             var returnedUser = Read(data, "memberID");
             if (!string.IsNullOrWhiteSpace(returnedUser) && !string.Equals(returnedUser, userName, StringComparison.OrdinalIgnoreCase))
                 throw new LauncherException("선택한 계정과 서버의 로그인 계정이 다릅니다. 다시 로그인해 주세요.");
+            var patchOnly = Read(data, "pathcheck") == "1";
+            if (Read(data, "systemCheck") == "O" && !patchOnly)
+                throw new LauncherException("서버 점검 중입니다. 점검 종료 후 다시 시도해 주세요.", "MAINTENANCE");
             fields["memberKey"] = memberKey;
             fields["InternetCafeType"] = "0";
             fields["hid_freeTrial"] = Read(data, "freeTrial") ?? "X";
@@ -142,11 +149,49 @@ public sealed class ActozAuthenticationClient : IDisposable
             fields["hidMemberID"] = Read(data, "encMemberID") ?? "";
             if (Read(data, "motpUse") == "O")
                 await CompleteOtpAsync(fields, requestOtp, cancellationToken);
+            if (patchOnly)
+            {
+                var session = new LauncherSession { UserName = userName, Provider = provider, IsPatchOnly = true, IssuedAtUtc = DateTimeOffset.UtcNow };
+                pendingSession = (session, new Dictionary<string, string>(fields, StringComparer.Ordinal));
+                return session;
+            }
             return await IssueTokenAsync(userName, provider, fields, cancellationToken);
         }
         finally
         {
             fields.Clear();
+        }
+    }
+
+    public void ClearPendingSession()
+    {
+        pendingSession?.Fields.Clear();
+        pendingSession = null;
+    }
+
+    public async Task<LauncherSession> RefreshSessionAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var pending = pendingSession ?? throw new LauncherException("현재 로그인 인증 정보가 없습니다. 새로 로그인해 주세요.", "SESSION_EXPIRED");
+        try
+        {
+            var session = await IssueTokenAsync(pending.Session.UserName, pending.Session.Provider, pending.Fields, cancellationToken);
+            ClearPendingSession();
+            return session;
+        }
+        catch (LauncherException error) when (error.Code == "-909")
+        {
+            return pending.Session;
+        }
+        catch (LauncherException)
+        {
+            ClearPendingSession();
+            throw;
+        }
+        catch (HttpRequestException error) when (error.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+        {
+            ClearPendingSession();
+            throw TokenError("-401");
         }
     }
 
@@ -247,6 +292,7 @@ public sealed class ActozAuthenticationClient : IDisposable
 
     public void Dispose()
     {
+        ClearPendingSession();
         form?.Clear();
         if (ownsClient) client.Dispose();
     }

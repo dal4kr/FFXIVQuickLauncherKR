@@ -44,7 +44,7 @@ public sealed class DalamudPreparation
                     var local = JsonSerializer.Deserialize<DalamudVersionInfo>(await File.ReadAllBytesAsync(infoPath, cancellationToken).ConfigureAwait(false), DalamudPackageStore.JsonOptions);
                     if (!string.IsNullOrWhiteSpace(local?.SupportedGameVer)) supported = local.SupportedGameVer;
                 }
-                EnsureGameVersion(gameVersion, supported);
+                EnsureGameVersion(gameVersion, supported, options.IgnoreGameVersion);
                 progress?.Report("KR Dalamud 로컬 빌드를 확인하는 중입니다…");
                 if (!await DalamudPackageStore.ValidateBinaryAsync(binaries, null, cancellationToken).ConfigureAwait(false))
                     throw new LauncherException("Dalamud 로컬 빌드 파일이 없거나 무결성 검사를 통과하지 못했습니다.");
@@ -54,7 +54,7 @@ public sealed class DalamudPreparation
             {
                 progress?.Report("KR Dalamud 배포 버전을 확인하는 중입니다…");
                 var info = await store.ReadJsonAsync<DalamudVersionInfo>(FreshUri(versionUri), cancellationToken).ConfigureAwait(false);
-                EnsureGameVersion(gameVersion, info.SupportedGameVer);
+                EnsureGameVersion(gameVersion, info.SupportedGameVer, options.IgnoreGameVersion);
                 if (string.IsNullOrWhiteSpace(info.AssemblyVersion) ||
                     info.AssemblyVersion.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('.' or '-' or '_')) ||
                     info.AssemblyVersion.Trim('.').Length == 0 || string.IsNullOrWhiteSpace(info.Hash))
@@ -103,11 +103,11 @@ public sealed class DalamudPreparation
         return builder.Uri;
     }
 
-    private static void EnsureGameVersion(string gameVersion, string supported)
+    private static void EnsureGameVersion(string gameVersion, string supported, bool ignoreVersion)
     {
         if (string.IsNullOrWhiteSpace(supported))
             throw new LauncherException("로컬 빌드의 대상 게임 버전을 입력하거나 version.json이 있는 빌드 폴더를 선택해 주세요.");
-        if (!string.Equals(gameVersion.Trim(), supported.Trim(), StringComparison.Ordinal))
+        if (!ignoreVersion && !string.Equals(gameVersion.Trim(), supported.Trim(), StringComparison.Ordinal))
             throw new LauncherException($"Dalamud 지원 게임 버전({supported.Trim()})과 설치된 게임 버전({gameVersion.Trim()})이 다릅니다.");
     }
 }

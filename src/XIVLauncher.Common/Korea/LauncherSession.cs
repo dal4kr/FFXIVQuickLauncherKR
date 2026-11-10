@@ -8,6 +8,7 @@ public sealed class LauncherSession
 {
     public string UserName { get; init; } = "";
     public LoginProvider Provider { get; init; }
+    public bool IsPatchOnly { get; init; }
     public string Token { get; init; } = "";
     public DateTimeOffset IssuedAtUtc { get; init; }
 
