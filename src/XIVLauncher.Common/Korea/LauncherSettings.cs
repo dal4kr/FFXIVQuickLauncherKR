@@ -6,10 +6,12 @@ public sealed class LauncherSettings
 {
     public string GameDirectory { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "FINAL FANTASY XIV - KOREA");
     public string UserName { get; set; } = "";
+    public string LauncherId { get; set; } = "";
     public LoginProvider Provider { get; set; }
     public bool SaveSession { get; set; } = true;
     public bool RunAsAdministrator { get; set; }
     public bool AutoLaunch { get; set; }
+    public bool UnlockDownloadBandwidth { get; set; }
     public Dalamud.DalamudOptions Dalamud { get; set; } = new();
 }
 

@@ -80,6 +80,8 @@
         </ControlTemplate>
       </TabControl.Template>
       <TabItem x:Name="GameTab" Header="게임 실행" IsSelected="True" Style="{StaticResource NavigationTab}">
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Margin="0,18,0,4">
             <Grid Margin="0,0,0,14">
@@ -125,6 +127,7 @@
                     <PasswordBox x:Name="Password" AutomationProperties.Name="비밀번호" />
                   </StackPanel>
                 </Grid>
+                <StackPanel x:Name="CaptchaPanel" Visibility="Collapsed">
                 <TextBlock Text="자동 입력 방지" Margin="0,13,0,7" />
                 <Grid>
                   <Grid.ColumnDefinitions><ColumnDefinition Width="170" /><ColumnDefinition Width="Auto" /><ColumnDefinition /></Grid.ColumnDefinitions>
@@ -134,13 +137,20 @@
                 </Grid>
                 <TextBlock Text="이미지의 문자 5자리를 입력해 주세요. 비밀번호는 저장하지 않습니다."
                            Foreground="{StaticResource Muted}" Margin="0,7,0,12" TextWrapping="Wrap" />
+                </StackPanel>
               </StackPanel>
               <TextBlock x:Name="NaverLoginHint" Text="네이버 로그인 버튼을 눌러 별도 창에서 인증해 주세요. 게임 OTP가 필요한 계정은 인증번호를 추가로 입력합니다."
                          Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,18" Visibility="Collapsed" />
             </StackPanel>
 
-            <CheckBox x:Name="SaveSession" Content="로그인 세션 저장"
-                      ToolTip="로그인 상태를 저장해 다음 실행 시 자동으로 로그인합니다. 비밀번호는 저장하지 않습니다." Margin="0,3,0,24"
+            <WrapPanel x:Name="AutomaticLoginActions" Margin="0,0,0,8">
+              <Button x:Name="AutomaticLoginButton" Content="U-OTP 자동 로그인 등록" Click="AutomaticLogin_Click" Margin="0,0,8,0" />
+              <Button x:Name="RenewAutomaticLoginButton" Content="유효기간 갱신" Click="RenewAutomaticLogin_Click" Visibility="Collapsed" />
+            </WrapPanel>
+            <TextBlock x:Name="AutomaticLoginHint" Text="U-OTP를 사용하는 액토즈 계정으로 로그인한 뒤 이 PC를 자동 로그인 환경으로 등록할 수 있습니다."
+                       Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,16" />
+            <CheckBox x:Name="SaveSession" Content="로그인 정보 저장"
+                      ToolTip="게임 세션과 등록한 자동 로그인 정보를 암호화해 저장합니다. 비밀번호와 OTP는 저장하지 않습니다." Margin="0,3,0,24"
                       Checked="SaveSession_Changed" Unchecked="SaveSession_Changed" />
             <CheckBox x:Name="AutoLaunch" Content="런처 시작 시 게임 자동 실행" IsChecked="False" Margin="0,0,0,4"
                       ToolTip="저장된 로그인 세션으로 게임을 실행합니다. Shift 키를 누른 채 런처를 켜면 이번에는 자동 실행을 건너뜁니다."
@@ -150,10 +160,12 @@
             <CheckBox x:Name="RunAsAdministrator" Content="관리자 권한으로 실행" IsChecked="False" Margin="0,0,0,16"
                       ToolTip="켜면 관리자 권한으로 재시작합니다. 해제는 다음 실행부터 적용됩니다."
                       Checked="Administrator_Changed" Unchecked="Administrator_Changed" />
-            <Button x:Name="LaunchButton" Content="로그인" FontSize="16" FontWeight="SemiBold" MinHeight="48"
-                    Background="{StaticResource Accent}" Foreground="#10223B" BorderBrush="{StaticResource Accent}" Click="Launch_Click" IsDefault="True" />
+
           </StackPanel>
         </ScrollViewer>
+          <Button x:Name="LaunchButton" Grid.Row="1" Margin="0,10,0,14" Content="로그인" FontSize="16" FontWeight="SemiBold" MinHeight="48"
+                    Background="{StaticResource Accent}" Foreground="#10223B" BorderBrush="{StaticResource Accent}" Click="Launch_Click" IsDefault="True" />
+        </Grid>
       </TabItem>
       <TabItem x:Name="GameUpdateTab" Header="게임 설치 / 업데이트" Style="{StaticResource NavigationTab}">
         <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -169,12 +181,28 @@
             </Grid>
             <TextBlock x:Name="GameVersionSummary" Text="버전을 확인해 주세요." TextWrapping="Wrap" Margin="0,0,0,12" />
             <TextBlock x:Name="GameUpdateStatus" Text="KR 서버의 파일 목록과 게임 패치 버전을 확인합니다." TextWrapping="Wrap" Margin="0,0,0,16" />
+            <CheckBox x:Name="UnlockDownloadBandwidth" Content="다운로드 대역폭 제한 해제" Margin="0,0,0,6"
+                      Checked="DownloadBandwidth_Changed" Unchecked="DownloadBandwidth_Changed" />
+            <TextBlock Text="켜면 최대 4개 파일을 동시에 내려받습니다." Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="22,0,0,16" />
             <ProgressBar x:Name="GameUpdateProgressBar" Height="12" Minimum="0" Maximum="100" Margin="0,0,0,18" />
             <WrapPanel>
               <Button x:Name="CheckGameUpdateButton" Content="업데이트 확인" Click="CheckGameUpdate_Click" Margin="0,0,8,8" />
               <Button x:Name="InstallGameButton" Content="게임 설치 / 업데이트" Click="InstallGame_Click" Margin="0,0,8,8" />
               <Button x:Name="CancelGameUpdateButton" Content="취소" Click="CancelGameUpdate_Click" Margin="0,0,0,8" IsEnabled="False" />
             </WrapPanel>
+            <Border BorderBrush="{StaticResource Outline}" BorderThickness="0,1,0,0" Padding="0,18,0,0" Margin="0,16,0,0">
+              <StackPanel>
+                <TextBlock Text="게임 파일 무결성 검사" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <TextBlock Text="공식 파일 목록과 게임 파일을 비교해 누락·변경된 파일을 확인합니다. 전체 파일을 읽으므로 시간이 걸릴 수 있습니다."
+                           Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,12" />
+                <TextBlock x:Name="IntegrityStatus" Text="검사를 실행해 주세요." TextWrapping="Wrap" Margin="0,0,0,12" />
+                <WrapPanel>
+                  <Button x:Name="CheckIntegrityButton" Content="무결성 검사" Click="CheckIntegrity_Click" Margin="0,0,8,8" />
+                  <Button x:Name="RepairIntegrityButton" Content="게임 파일 복구" Click="RepairIntegrity_Click" IsEnabled="False" Margin="0,0,0,8" />
+                </WrapPanel>
+                <ListBox x:Name="IntegrityIssues" MaxHeight="160" Visibility="Collapsed" Margin="0,6,0,0" />
+              </StackPanel>
+            </Border>
           </StackPanel>
         </ScrollViewer>
       </TabItem>

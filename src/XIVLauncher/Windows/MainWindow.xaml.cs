@@ -32,6 +32,11 @@ public partial class MainWindow : Window
     private readonly DalamudPreparation dalamudPreparation;
     private LauncherSession? session;
     private bool challengeReady;
+    private bool forceManualLogin;
+    private bool requiresCaptcha;
+    private string launcherId = "";
+    private GameIntegrityCheck? integrityCheck;
+    private string? integrityDirectory;
     private bool busy;
     private bool launching;
     private bool initialized;
@@ -61,18 +66,23 @@ public partial class MainWindow : Window
 
     private void ReloadSettings()
     {
-        authentication.ClearPendingSession();
+        if (initialized) ResetIntegrityResult("설정을 불러왔습니다. 무결성 검사를 다시 실행해 주세요.");
+        authentication.ResetAuthentication();
         var previous = initialized;
         initialized = false;
         try
         {
             var settings = settingsStore.Load();
+            launcherId = Guid.TryParseExact(settings.LauncherId, "D", out _) ? settings.LauncherId : Guid.NewGuid().ToString("D").ToUpperInvariant();
+            forceManualLogin = false;
             GameDirectory.Text = settings.GameDirectory;
             LoginProviderPicker.SelectedValue = Enum.IsDefined(settings.Provider) ? settings.Provider : LoginProvider.Actoz;
             UserName.Text = settings.UserName;
             SaveSession.IsChecked = settings.SaveSession;
             RunAsAdministrator.IsChecked = settings.RunAsAdministrator;
             AutoLaunch.IsChecked = settings.AutoLaunch;
+            UnlockDownloadBandwidth.IsChecked = settings.UnlockDownloadBandwidth;
+            gameUpdater.UnlockDownloadBandwidth = settings.UnlockDownloadBandwidth;
             var options = settings.Dalamud ?? new();
             UseDalamud.IsChecked = options.Enabled;
             DalamudLoadMethodPicker.SelectedValue = Enum.IsDefined(options.LoadMethod) ? options.LoadMethod : DalamudLoadMethod.DllInject;
@@ -92,7 +102,7 @@ public partial class MainWindow : Window
                 if (account is not null) UserName.Text = account.UserName;
             }
             catch (LauncherException error) { AccountStorageWarning.Text = error.Message + " 이번 실행에서는 로그인 정보를 저장하지 않고 사용할 수 있습니다."; }
-            session = account?.RestoreSession();
+            session = account?.AutomaticLogin is null ? account?.RestoreSession() : null;
         }
         finally { initialized = previous; }
     }
@@ -105,8 +115,7 @@ public partial class MainWindow : Window
         await RunBusyAsync(async () =>
         {
             _ = GetGameDirectory();
-            if (session is null) await PrepareLoginAsync();
-            else Status.Text = "저장된 세션을 불러왔습니다. 게임 실행 버튼을 눌러 주세요.";
+            await RestoreSelectedAccountAsync(checkPage: true);
             if (AutoLaunch.IsChecked != true) return;
             if (skipAutoLaunch)
             {
@@ -119,10 +128,48 @@ public partial class MainWindow : Window
         });
     }
 
+    private bool CanAutomaticLogin => !forceManualLogin && SelectedProvider == LoginProvider.Actoz && account?.AutomaticLogin is not null;
+
+    private async Task RestoreSelectedAccountAsync(bool checkPage = false)
+    {
+        authentication.ResetAuthentication();
+        session = null;
+        if (CanAutomaticLogin)
+        {
+            await LoginAutomaticallyAsync(checkPage);
+            return;
+        }
+        if (!forceManualLogin) session = account?.RestoreSession();
+        if (session is null) await PrepareLoginAsync();
+        else Status.Text = "저장된 세션을 불러왔습니다. 게임 실행 버튼을 눌러 주세요.";
+    }
+
+    private async Task LoginAutomaticallyAsync(bool checkPage)
+    {
+        var saved = account ?? throw new LauncherException("저장된 계정을 선택해 주세요.");
+        var credentials = saved.AutomaticLogin ?? throw new LauncherException("자동 로그인을 먼저 등록해 주세요.");
+        Status.Text = "저장된 기기 정보로 자동 로그인하는 중입니다…";
+        try
+        {
+            session = await authentication.LoginAutomaticallyAsync(saved.UserName, credentials, closing.Token, checkPage);
+            RememberAccount();
+            Status.Text = session.IsPatchOnly ? "자동 로그인했습니다. 사전 패치와 접속 상태 새로고침을 사용할 수 있습니다." : "자동 로그인했습니다. 게임 실행 버튼을 눌러 주세요.";
+        }
+        catch (LauncherException error) when (ActozAuthenticationClient.IsInvalidAutomaticLogin(error.Code))
+        {
+            account = new StoredAccount { UserName = saved.UserName, Provider = saved.Provider };
+            session = null;
+            forceManualLogin = true;
+            PersistAccount();
+            await PrepareLoginAsync();
+            throw;
+        }
+    }
+
     private void UpdateControls()
     {
         var patchOnly = session?.IsPatchOnly == true;
-        LoginPanel.Visibility = session is not null ? Visibility.Collapsed : Visibility.Visible;
+        LoginPanel.Visibility = session is not null || CanAutomaticLogin ? Visibility.Collapsed : Visibility.Visible;
         ActozLoginPanel.Visibility = SelectedProvider == LoginProvider.Actoz ? Visibility.Visible : Visibility.Collapsed;
         NaverLoginHint.Visibility = SelectedProvider == LoginProvider.Naver ? Visibility.Visible : Visibility.Collapsed;
         LoginProviderPicker.IsEnabled = !busy;
@@ -131,22 +178,40 @@ public partial class MainWindow : Window
             ? "현재는 사전 패치만 가능합니다. 점검이 끝나면 접속 상태를 새로고침해 주세요."
             : "현재 로그인 인증 정보가 없습니다. 새로 로그인해 주세요.";
         SessionDate.Text = patchOnly ? patchHint : session is null ? "로그인하면 게임을 실행할 수 있습니다." : $"세션 발급: {session.IssuedAtUtc.ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm} (KST)";
-        LaunchButton.Content = patchOnly ? "게임 설치 / 업데이트" : session is not null ? "게임 실행" : SelectedProvider == LoginProvider.Naver ? "네이버 로그인" : "로그인";
+        LaunchButton.Content = patchOnly ? "게임 설치 / 업데이트" : session is not null ? "게임 실행" : CanAutomaticLogin ? "자동 로그인" : SelectedProvider == LoginProvider.Naver ? "네이버 로그인" : challengeReady ? "로그인" : "로그인 화면 불러오기";
         AccountPicker.IsEnabled = !busy;
         AddAccountButton.IsEnabled = !busy;
         CheckGameUpdateButton.IsEnabled = !busy;
         InstallGameButton.IsEnabled = !busy;
+        CheckIntegrityButton.IsEnabled = !busy;
+        RepairIntegrityButton.IsEnabled = !busy && integrityCheck?.NeedsRepair == true;
+        var hasAutomaticLogin = account?.AutomaticLogin is not null;
+        var showAutomaticLogin = SelectedProvider == LoginProvider.Actoz && (!forceManualLogin || session is not null);
+        var canManageAutomaticLogin = session is not null && (hasAutomaticLogin || authentication.CanRegisterAutomaticLogin);
+        AutomaticLoginActions.Visibility = showAutomaticLogin ? Visibility.Visible : Visibility.Collapsed;
+        AutomaticLoginButton.Visibility = AutomaticLoginActions.Visibility;
+        AutomaticLoginHint.Visibility = AutomaticLoginActions.Visibility;
+        AutomaticLoginButton.Content = hasAutomaticLogin ? "자동 로그인 등록 해제" : "U-OTP 자동 로그인 등록";
+        AutomaticLoginButton.IsEnabled = !busy && canManageAutomaticLogin;
+        RenewAutomaticLoginButton.Visibility = showAutomaticLogin && hasAutomaticLogin ? Visibility.Visible : Visibility.Collapsed;
+        RenewAutomaticLoginButton.IsEnabled = !busy && session is not null && hasAutomaticLogin;
+        AutomaticLoginHint.Text = hasAutomaticLogin
+            ? $"자동 로그인 환경: {account!.AutomaticLogin!.EnvironmentName} · 유효기간 갱신에는 새 U-OTP 인증번호가 필요합니다."
+            : session is not null && !forceManualLogin
+                ? "저장된 게임 세션만 불러온 상태입니다. ‘새로 로그인’에서 U-OTP 인증을 마치면 자동 로그인을 등록할 수 있습니다."
+                : "U-OTP를 사용하는 액토즈 계정으로 로그인하면 이 PC를 자동 로그인 환경으로 등록할 수 있습니다.";
+        UnlockDownloadBandwidth.IsEnabled = !busy;
         CancelGameUpdateButton.IsEnabled = gameUpdateCancellation is not null;
-        LaunchButton.IsEnabled = !busy && (session is not null || SelectedProvider == LoginProvider.Naver || challengeReady);
+        LaunchButton.IsEnabled = !busy;
         BrowseButton.IsEnabled = !busy;
         NewLoginButton.IsEnabled = !busy;
-        RefreshSessionButton.Visibility = patchOnly ? Visibility.Visible : Visibility.Collapsed;
+        RefreshSessionButton.Visibility = patchOnly && authentication.CanRefreshSession ? Visibility.Visible : Visibility.Collapsed;
         RefreshSessionButton.IsEnabled = !busy && patchOnly && authentication.CanRefreshSession;
         DeleteSessionButton.IsEnabled = !busy && account is not null;
         RefreshCaptchaButton.IsEnabled = !busy;
         GameDirectory.IsEnabled = !busy;
         LoginPanel.IsEnabled = !busy;
-        SaveSession.IsEnabled = !busy && !patchOnly;
+        SaveSession.IsEnabled = !busy;
         AutoLaunch.IsEnabled = !busy;
         CreateBackupButton.IsEnabled = !busy;
         RestoreBackupButton.IsEnabled = !busy;
@@ -201,7 +266,7 @@ public partial class MainWindow : Window
 
     private Task PrepareLoginAsync()
     {
-        authentication.ClearPendingSession();
+        authentication.ResetAuthentication();
         if (SelectedProvider == LoginProvider.Actoz) return LoadCaptchaAsync();
         challengeReady = false;
         CaptchaImage.Source = null;
@@ -216,6 +281,7 @@ public partial class MainWindow : Window
         if (!initialized || busy) return;
         account = null;
         session = null;
+        forceManualLogin = true;
         initialized = false;
         AccountPicker.SelectedItem = null;
         initialized = true;
@@ -232,13 +298,21 @@ public partial class MainWindow : Window
         return Task.FromResult(prompt.ShowDialog() == true ? prompt.Code : null);
     }
 
-    private async Task LoadCaptchaAsync()
+    private async Task LoadCaptchaAsync(bool requireCaptcha = false)
     {
+        requiresCaptcha = requireCaptcha;
+        CaptchaPanel.Visibility = requireCaptcha ? Visibility.Visible : Visibility.Collapsed;
         challengeReady = false;
         CaptchaImage.Source = null;
         CaptchaCode.Clear();
         Status.Text = "로그인 화면을 불러오는 중입니다…";
-        var challenge = await authentication.PrepareAsync(closing.Token);
+        var challenge = await authentication.PrepareAsync(closing.Token, requireCaptcha);
+        if (challenge.CaptchaImage is null)
+        {
+            challengeReady = true;
+            Status.Text = "액토즈 계정 정보를 입력해 주세요. U-OTP는 필요한 계정에서 추가로 입력합니다.";
+            return;
+        }
         using var stream = new MemoryStream(challenge.CaptchaImage);
         var image = new BitmapImage();
         image.BeginInit();
@@ -251,7 +325,7 @@ public partial class MainWindow : Window
         Status.Text = "액토즈 계정 정보와 자동 입력 방지 문자를 입력해 주세요.";
     }
 
-    private async void RefreshCaptcha_Click(object sender, RoutedEventArgs e) => await RunBusyAsync(PrepareLoginAsync);
+    private async void RefreshCaptcha_Click(object sender, RoutedEventArgs e) => await RunBusyAsync(() => LoadCaptchaAsync(requireCaptcha: true));
 
     private void ReloadAccounts(string? selectedUser = null, LoginProvider? provider = null)
     {
@@ -269,9 +343,10 @@ public partial class MainWindow : Window
     private async void AccountSelection_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         if (!initialized || busy || AccountPicker.SelectedItem is not StoredAccount selected) return;
-        authentication.ClearPendingSession();
+        authentication.ResetAuthentication();
         account = selected;
-        session = account.RestoreSession();
+        session = null;
+        forceManualLogin = false;
         UserName.Text = account.UserName;
         Password.Clear();
         initialized = false;
@@ -280,8 +355,7 @@ public partial class MainWindow : Window
         initialized = true;
         await RunBusyAsync(async () =>
         {
-            if (session is null) await PrepareLoginAsync();
-            else Status.Text = "저장된 세션을 불러왔습니다. 게임 실행 버튼을 눌러 주세요.";
+            await RestoreSelectedAccountAsync();
             SaveSettings();
         });
     }
@@ -291,6 +365,7 @@ public partial class MainWindow : Window
         if (busy) return;
         account = null;
         session = null;
+        forceManualLogin = true;
         initialized = false;
         AccountPicker.SelectedItem = null;
         initialized = true;
@@ -305,10 +380,11 @@ public partial class MainWindow : Window
         if (busy) return;
         if (account is not null)
         {
-            account = new StoredAccount { UserName = account.UserName, Provider = account.Provider };
+            account = new StoredAccount { UserName = account.UserName, Provider = account.Provider, AutomaticLogin = account.AutomaticLogin };
             PersistAccount();
         }
         session = null;
+        forceManualLogin = true;
         Password.Clear();
         await RunBusyAsync(PrepareLoginAsync);
         UserName.Focus();
@@ -318,9 +394,25 @@ public partial class MainWindow : Window
     {
         await RunBusyAsync(async () =>
         {
-            if (session?.IsPatchOnly != true) return;
+            if (session?.IsPatchOnly != true || !authentication.CanRefreshSession) return;
             Status.Text = "게임 접속 가능 여부를 확인하는 중입니다…";
-            session = await authentication.RefreshSessionAsync(closing.Token);
+            try { session = await authentication.RefreshSessionAsync(closing.Token); }
+            catch (LauncherException error)
+            {
+                session = null;
+                authentication.ResetAuthentication();
+                challengeReady = false;
+                if (account is not null)
+                {
+                    account = new StoredAccount
+                    {
+                        UserName = account.UserName, Provider = account.Provider,
+                        AutomaticLogin = ActozAuthenticationClient.IsInvalidAutomaticLogin(error.Code) ? null : account.AutomaticLogin,
+                    };
+                    PersistAccount();
+                }
+                throw;
+            }
             if (session.IsPatchOnly)
             {
                 Status.Text = "아직 서버 점검 중입니다. 잠시 후 접속 상태를 다시 새로고침해 주세요.";
@@ -366,7 +458,9 @@ public partial class MainWindow : Window
     private void RememberAccount()
     {
         if (session is null || session.IsPatchOnly) return;
-        account = StoredAccount.FromSession(session);
+        var automatic = account?.Provider == session.Provider && string.Equals(account.UserName, session.UserName, StringComparison.OrdinalIgnoreCase)
+            ? account.AutomaticLogin : null;
+        account = StoredAccount.FromSession(session, automatic);
         PersistAccount();
     }
 
@@ -397,9 +491,13 @@ public partial class MainWindow : Window
         if (!initialized || busy || closing.IsCancellationRequested) return;
         await RunBusyAsync(async () =>
         {
+            var directory = GetGameDirectory();
+            if (integrityCheck is not null && !string.Equals(integrityDirectory, directory, StringComparison.OrdinalIgnoreCase))
+            {
+                ResetIntegrityResult("설치 경로가 바뀌었습니다. 무결성 검사를 다시 실행해 주세요.");
+            }
             SaveSettings();
-            _ = GetGameDirectory();
-            if (session is null && (SelectedProvider == LoginProvider.Naver || !challengeReady)) await PrepareLoginAsync();
+            if (session is null && !CanAutomaticLogin && (SelectedProvider == LoginProvider.Naver || !challengeReady)) await PrepareLoginAsync();
             else Status.Text = "게임 설치 경로를 저장했습니다.";
         });
     }
@@ -474,6 +572,58 @@ public partial class MainWindow : Window
             var version = Path.GetFileName(prepared.BinaryDirectory);
             Status.Text = forceRedownload ? $"KR Dalamud {version}을 다시 설치했습니다."
                 : $"KR Dalamud {version}: 최신 배포 확인과 파일 준비를 마쳤습니다.";
+        });
+    }
+
+    private async void RenewAutomaticLogin_Click(object sender, RoutedEventArgs e)
+    {
+        await RunBusyAsync(async () =>
+        {
+            var credentials = account?.AutomaticLogin;
+            if (credentials is null) throw new LauncherException("자동 로그인을 먼저 등록해 주세요.");
+            var prompt = new OtpWindow(null, "이 PC의 자동 로그인 유효기간을 오늘부터 90일로 갱신합니다. 새 U-OTP 인증번호 7자리를 입력해 주세요.")
+            { Owner = this, Title = "자동 로그인 유효기간 갱신" };
+            string? otp;
+            using (closing.Token.Register(() => Dispatcher.BeginInvoke(() => prompt.Close())))
+            {
+                if (prompt.ShowDialog() != true) return;
+                otp = prompt.Code;
+            }
+            if (otp is null) return;
+            await authentication.RenewAutomaticLoginAsync(credentials, otp, closing.Token);
+            Status.Text = "이 PC의 자동 로그인 유효기간을 갱신했습니다.";
+        });
+    }
+
+    private async void AutomaticLogin_Click(object sender, RoutedEventArgs e)
+    {
+        await RunBusyAsync(async () =>
+        {
+            if (account?.AutomaticLogin is AutoLoginCredentials registered)
+            {
+                await authentication.UnregisterAutomaticLoginAsync(registered, closing.Token);
+                account = new StoredAccount { UserName = account.UserName, Provider = account.Provider };
+                session = null;
+                forceManualLogin = true;
+                PersistAccount();
+                await PrepareLoginAsync();
+                Status.Text = "이 PC의 자동 로그인 등록을 해제했습니다.";
+            }
+            else
+            {
+                if (session is null || !authentication.CanRegisterAutomaticLogin)
+                    throw new LauncherException("U-OTP를 사용하는 액토즈 계정으로 먼저 로그인해 주세요.");
+                var dialog = new AutoLoginWindow { Owner = this };
+                if (dialog.ShowDialog() != true) return;
+                var credentials = await authentication.RegisterAutomaticLoginAsync(launcherId, AutoLoginDevice.CreateId(), dialog.EnvironmentName, dialog.Code, closing.Token);
+                account = new StoredAccount { UserName = session.UserName, Provider = session.Provider, Token = session.Token, IssuedAtUtc = session.IssuedAtUtc, AutomaticLogin = credentials };
+                SaveSession.IsChecked = true;
+                PersistAccount();
+                Status.Text = string.IsNullOrEmpty(AccountStorageWarning.Text)
+                    ? "자동 로그인 환경을 등록했습니다. 다음 실행부터 비밀번호와 U-OTP 입력 없이 로그인합니다."
+                    : "환경 등록은 완료했지만 자동 로그인 정보를 저장하지 못했습니다. 위 안내를 확인해 주세요.";
+            }
+            SaveSettings();
         });
     }
 
@@ -558,9 +708,18 @@ public partial class MainWindow : Window
             if (session is null)
             {
                 _ = GetGameDirectory();
+                if (SelectedProvider == LoginProvider.Actoz && !CanAutomaticLogin && !challengeReady)
+                {
+                    await LoadCaptchaAsync(requiresCaptcha);
+                    if (requiresCaptcha) return;
+                }
                 try
                 {
-                    if (SelectedProvider == LoginProvider.Naver)
+                    if (CanAutomaticLogin)
+                    {
+                        await LoginAutomaticallyAsync(checkPage: false);
+                    }
+                    else if (SelectedProvider == LoginProvider.Naver)
                     {
                         var login = new NaverLoginWindow { Owner = this };
                         if (login.ShowDialog() != true)
@@ -574,8 +733,10 @@ public partial class MainWindow : Window
                     }
                     else
                     {
-                        if (string.IsNullOrWhiteSpace(UserName.Text) || Password.Password.Length == 0 || CaptchaCode.Text.Trim().Length != 5)
-                            throw new LauncherException("아이디, 비밀번호와 5자리 자동 입력 방지 문자를 입력해 주세요.");
+                        if (string.IsNullOrWhiteSpace(UserName.Text) || Password.Password.Length == 0)
+                            throw new LauncherException("아이디와 비밀번호를 입력해 주세요.");
+                        if (requiresCaptcha && CaptchaCode.Text.Trim().Length != 5)
+                            throw new LauncherException("자동 입력 방지 문자 5자리를 입력해 주세요.", "CAPTCHA");
                         Status.Text = "로그인하고 게임 세션을 발급받는 중입니다…";
                         challengeReady = false;
                         var login = authentication.LoginAsync(UserName.Text, Password.Password, CaptchaCode.Text, closing.Token, RequestOtpAsync);
@@ -585,13 +746,20 @@ public partial class MainWindow : Window
                 }
                 catch (LauncherException error) when (error.Code == "CANCELED")
                 {
-                    Status.Text = SelectedProvider == LoginProvider.Actoz ? "OTP 인증을 취소했습니다. 다시 로그인하려면 자동 입력 방지 이미지를 새로고침해 주세요." : "OTP 인증을 취소했습니다.";
+                    await PrepareLoginAsync();
+                    Status.Text = "OTP 인증을 취소했습니다. 다시 로그인할 수 있습니다.";
                     return;
                 }
+                catch (LauncherException error) when (SelectedProvider == LoginProvider.Actoz && !CanAutomaticLogin && !ActozAuthenticationClient.IsInvalidAutomaticLogin(error.Code))
+                {
+                    await LoadCaptchaAsync(requireCaptcha: requiresCaptcha || error.Code is "-106" or "P" or "T" or "E" or "C" or "-102" or "-107");
+                    throw;
+                }
                 finally { Password.Clear(); }
+                var authenticated = session ?? throw new LauncherException("로그인 상태를 확인하지 못했습니다. 다시 로그인해 주세요.");
                 RememberAccount();
                 SaveSettings();
-                if (session.IsPatchOnly)
+                if (authenticated.IsPatchOnly)
                 {
                     var check = await gameUpdater.CheckAsync(GetGameDirectory(), cancellationToken: closing.Token);
                     ShowGameUpdate(check);
@@ -690,6 +858,7 @@ public partial class MainWindow : Window
     private async Task<bool> ApplyGameUpdateAsync(GameUpdateCheck check)
     {
         var gameRoot = GetGameDirectory();
+        ResetIntegrityResult();
         foreach (var name in new[] { "ffxiv_dx11", "FFXIV_Boot", "FFXIV_Launcher" })
         {
             var running = Process.GetProcessesByName(name);
@@ -723,6 +892,75 @@ public partial class MainWindow : Window
             throw new LauncherException("게임 업데이트를 취소했습니다. 다시 실행하면 내려받기를 이어갑니다.");
         }
         finally { gameUpdateCancellation = null; UpdateControls(); }
+    }
+
+    private void ResetIntegrityResult(string? message = null)
+    {
+        integrityCheck = null;
+        integrityDirectory = null;
+        IntegrityIssues.ItemsSource = null;
+        IntegrityIssues.Visibility = Visibility.Collapsed;
+        if (message is not null) IntegrityStatus.Text = message;
+    }
+
+    private async void CheckIntegrity_Click(object sender, RoutedEventArgs e)
+    {
+        await RunBusyAsync(async () =>
+        {
+            ResetIntegrityResult();
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(closing.Token);
+            gameUpdateCancellation = cancellation;
+            UpdateControls();
+            try
+            {
+                integrityDirectory = GetGameDirectory();
+                integrityCheck = await gameUpdater.CheckIntegrityAsync(integrityDirectory, new Progress<GameIntegrityProgress>(value =>
+                {
+                    GameUpdateProgressBar.Value = value.Percentage;
+                    IntegrityStatus.Text = $"{value.CompletedFiles:N0} / {value.TotalFiles:N0}개 파일 · {value.Percentage:F1}% · {value.Message}";
+                    Status.Text = "게임 파일의 무결성을 검사하는 중입니다…";
+                }), cancellation.Token);
+                IntegrityStatus.Text = $"{integrityCheck.Message}\n불일치: {integrityCheck.Issues.Count:N0}개 · 복구 다운로드: {integrityCheck.DownloadBytes / (1024.0 * 1024.0):N1} MB";
+                IntegrityIssues.ItemsSource = integrityCheck.Issues.Select(x => $"{x.RelativePath} · {x.Kind switch { GameIntegrityIssueKind.Missing => "누락", GameIntegrityIssueKind.RecoverySnapshotMismatch => "공식 복구 기준과 다름", _ => "공식 파일과 다름" }}");
+                IntegrityIssues.Visibility = integrityCheck.Issues.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+                Status.Text = "무결성 검사를 완료했습니다.";
+            }
+            catch (OperationCanceledException) when (!closing.IsCancellationRequested) { Status.Text = "무결성 검사를 취소했습니다."; IntegrityStatus.Text = Status.Text; }
+            finally { gameUpdateCancellation = null; UpdateControls(); }
+        });
+    }
+
+    private async void RepairIntegrity_Click(object sender, RoutedEventArgs e)
+    {
+        await RunBusyAsync(async () =>
+        {
+            var check = integrityCheck;
+            if (check?.NeedsRepair != true) return;
+            ResetIntegrityResult();
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(closing.Token);
+            gameUpdateCancellation = cancellation;
+            UpdateControls();
+            try
+            {
+                await gameUpdater.RepairIntegrityAsync(GetGameDirectory(), check, new Progress<GameUpdateProgress>(value =>
+                {
+                    GameUpdateProgressBar.Value = value.Percentage;
+                    IntegrityStatus.Text = value.Message;
+                    Status.Text = value.Message;
+                }), cancellation.Token);
+                integrityCheck = null;
+                IntegrityIssues.ItemsSource = null;
+                IntegrityIssues.Visibility = Visibility.Collapsed;
+                var verified = await gameUpdater.CheckAsync(GetGameDirectory(), session?.Token, closing.Token);
+                ShowGameUpdate(verified);
+                if (verified.NeedsUpdate || verified.IsMaintenance || verified.RequiresAuthentication)
+                    throw new LauncherException("복구 후 게임 상태를 확인해 주세요. " + verified.Message);
+                IntegrityStatus.Text = "게임 파일을 복구하고 최신 패치를 적용했습니다.";
+                Status.Text = IntegrityStatus.Text;
+            }
+            catch (OperationCanceledException) when (!closing.IsCancellationRequested) { integrityCheck = null; Status.Text = "게임 파일 복구를 취소했습니다. 다시 검사하거나 업데이트를 실행해 주세요."; IntegrityStatus.Text = Status.Text; }
+            finally { gameUpdateCancellation = null; UpdateControls(); }
+        });
     }
 
     private void CancelGameUpdate_Click(object sender, RoutedEventArgs e) => gameUpdateCancellation?.Cancel();
@@ -818,13 +1056,24 @@ public partial class MainWindow : Window
     private void SaveSettings() => settingsStore.Save(new LauncherSettings
     {
         UserName = session?.UserName ?? UserName.Text.Trim(),
+        LauncherId = launcherId,
         Provider = session?.Provider ?? SelectedProvider,
         GameDirectory = GameDirectory.Text.Trim(),
         SaveSession = SaveSession.IsChecked == true,
         RunAsAdministrator = RunAsAdministrator.IsChecked == true,
         AutoLaunch = AutoLaunch.IsChecked == true,
+        UnlockDownloadBandwidth = UnlockDownloadBandwidth.IsChecked == true,
         Dalamud = GetDalamudOptions(),
     });
+
+    private void DownloadBandwidth_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!initialized || busy) return;
+        gameUpdater.UnlockDownloadBandwidth = UnlockDownloadBandwidth.IsChecked == true;
+        try { SaveSettings(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { ShowError("다운로드 설정을 저장하지 못했습니다. 저장 폴더의 권한을 확인해 주세요."); }
+    }
 
     private void AutoLaunch_Changed(object sender, RoutedEventArgs e)
     {

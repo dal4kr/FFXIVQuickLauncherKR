@@ -10,7 +10,7 @@ namespace XIVLauncher.Common.Korea.Patching;
 /// KR manifests provide complete files; the upstream ZiPatch engine applies incremental
 /// updates. No launcher, game, installer or elevation helper is executed here.
 /// </summary>
-public sealed class KrGameUpdater(HttpClient http)
+public sealed partial class KrGameUpdater(HttpClient http)
 {
     private const string CacheDirectory = ".xivlauncher-update";
     private readonly SemaphoreSlim updateGate = new(1, 1);
@@ -54,12 +54,12 @@ public sealed class KrGameUpdater(HttpClient http)
         }
     }
 
-    private async Task<GameUpdateCheck> CheckSnapshotAsync(string root, string? current, CancellationToken token)
+    private async Task<GameUpdateCheck> CheckSnapshotAsync(string root, string? current, CancellationToken token, IntegrityScan? integrity = null)
     {
         // Neither full manifest is needed for the normal pre-launch check. When a
         // complete snapshot is required, independent metadata requests run together.
         var gameTask = GetManifestAsync(KrPatchProtocol.GameManifest, "game", token);
-        var bootTask = GetManifestAsync(KrPatchProtocol.BootManifest, "boot", token);
+        var bootTask = integrity == null ? GetManifestAsync(KrPatchProtocol.BootManifest, "boot", token) : Task.FromResult(new FileManifest([]));
         await Task.WhenAll(gameTask, bootTask).ConfigureAwait(false);
         var game = await gameTask.ConfigureAwait(false);
         var boot = await bootTask.ConfigureAwait(false);
@@ -92,14 +92,27 @@ public sealed class KrGameUpdater(HttpClient http)
         if (KrPatchProtocol.IsVersion(current) && string.CompareOrdinal(current, latest) > 0)
             throw new InvalidDataException("설치된 게임보다 공식 복구 파일이 오래되었습니다. 이전 버전으로 덮어쓰지 않습니다.");
 
+        var original = snapshot.Keys.ToDictionary(path => path, path => ReadVersion(root, path), StringComparer.OrdinalIgnoreCase);
+        if (integrity != null)
+        {
+            foreach (var version in original)
+            {
+                if (KrPatchProtocol.IsVersion(version.Value) && string.CompareOrdinal(version.Value, versions[version.Key]) > 0)
+                    throw new InvalidDataException("설치된 저장소 버전으로 돌아오는 공식 복구 패치 경로가 없습니다. 이전 버전으로 덮어쓰지 않습니다.");
+            }
+            integrity.Start(snapshotVersion, game.Files, snapshot, original);
+        }
+
         var files = new List<DownloadItem>();
         foreach (var file in boot.Files.Concat(game.Files))
         {
             token.ThrowIfCancellationRequested();
-            if (!await KrPatchProtocol.FileMatchesAsync(UpdatePath.In(root, file.RelativePath), file.Size, file.Md5, token).ConfigureAwait(false))
+            var matches = integrity != null
+                ? await integrity.MatchesAsync(root, file, token).ConfigureAwait(false)
+                : await KrPatchProtocol.FileMatchesAsync(UpdatePath.In(root, file.RelativePath), file.Size, file.Md5, token).ConfigureAwait(false);
+            if (!matches)
                 files.Add(file);
         }
-        var original = snapshot.Keys.ToDictionary(path => path, path => ReadVersion(root, path), StringComparer.OrdinalIgnoreCase);
         return CreateCheck(root, current, snapshotVersion, files, patches, versions, original);
     }
 
@@ -177,12 +190,14 @@ public sealed class KrGameUpdater(HttpClient http)
             var pending = UpdatePath.In(root, CacheDirectory + "/pending");
             void MarkPending() => File.WriteAllText(UpdatePath.In(root, CacheDirectory + "/pending"), "Incomplete update: recheck and verify before launch.");
             var state = new TransferState(check.DownloadBytes, plan.Files.Count + plan.Patches.Count, progress);
+            await using var downloads = new DownloadQueue(this, root, plan, state, cancellationToken);
             var versionDownloads = new List<(DownloadItem File, string Cache)>();
             var patchDownloads = new List<string>();
             foreach (var file in plan.Files)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var download = await DownloadAsync(root, file.Url, file.Size, file.Md5, null, state, file.RelativePath, cancellationToken).ConfigureAwait(false);
+                var download = await downloads.NextAsync().ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (KrPatchProtocol.IsVersionFile(file.RelativePath)) versionDownloads.Add((file, download));
                 else
                 {
@@ -194,7 +209,7 @@ public sealed class KrGameUpdater(HttpClient http)
             foreach (var patch in plan.Patches)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var download = await DownloadAsync(root, patch.Url, patch.Size, null, patch, state, patch.Version, cancellationToken).ConfigureAwait(false);
+                var download = await downloads.NextAsync().ConfigureAwait(false);
                 // Validate every CRC and path before the first chunk writes. Cancellation
                 // is honored before a patch; an active patch finishes to a safe boundary.
                 GuardRunningProcesses();
@@ -299,11 +314,12 @@ public sealed class KrGameUpdater(HttpClient http)
 
     private sealed class TransferState(long totalBytes, int totalFiles, IProgress<GameUpdateProgress>? progress)
     {
+        private readonly object sync = new();
         private long bytes;
         private int files;
-        internal void Add(long count, string message) { bytes = checked(bytes + count); Report(message); }
-        internal void Complete(string message) { files++; Report(message); }
-        internal void Finish() { bytes = totalBytes; files = totalFiles; Report("한국 게임 업데이트를 완료했습니다."); }
+        internal void Add(long count, string message) { lock (sync) { bytes = checked(bytes + count); Report(message); } }
+        internal void Complete(string message) { lock (sync) { files++; Report(message); } }
+        internal void Finish() { lock (sync) { bytes = totalBytes; files = totalFiles; Report("한국 게임 업데이트를 완료했습니다."); } }
         private void Report(string message) => progress?.Report(new GameUpdateProgress(bytes, totalBytes, files, totalFiles, message));
     }
 

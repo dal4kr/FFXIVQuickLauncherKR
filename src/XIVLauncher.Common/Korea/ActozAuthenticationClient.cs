@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 using AngleSharp.Html.Parser;
 
 namespace XIVLauncher.Common.Korea;
@@ -12,8 +13,13 @@ public sealed class ActozAuthenticationClient : IDisposable
     private readonly bool ownsClient;
     private readonly CookieContainer? cookieJar;
     private Dictionary<string, string>? form;
-    private (LauncherSession Session, Dictionary<string, string> Fields)? pendingSession;
-    public bool CanRefreshSession => pendingSession is not null;
+    private string? authenticatedUserName;
+    private LoginProvider authenticatedProvider;
+    private string? registrationMemberKey;
+    private string accessToken = "";
+    private LauncherSession? issuedSession;
+    public bool CanRefreshSession => authenticatedUserName is not null && issuedSession is null;
+    public bool CanRegisterAutomaticLogin => authenticatedProvider == LoginProvider.Actoz && registrationMemberKey is not null;
 
     public ActozAuthenticationClient() : this(new CookieContainer()) { }
 
@@ -34,12 +40,12 @@ public sealed class ActozAuthenticationClient : IDisposable
         this.client.DefaultRequestHeaders.UserAgent.ParseAdd("FFXIVLauncherKR/0.2");
     }
 
-    public async Task<LoginChallenge> PrepareAsync(CancellationToken cancellationToken = default)
+    public async Task<LoginChallenge> PrepareAsync(CancellationToken cancellationToken = default, bool requireCaptcha = false)
     {
-        ClearPendingSession();
-        form?.Clear();
-        form = null;
+        ResetAuthentication();
         var page = await ReadLoginPageAsync(cancellationToken);
+        form = page.Fields;
+        if (!requireCaptcha) return new LoginChallenge(null);
         if (!page.Fields.ContainsKey("BDC_VCID_LauncherLoginCaptcha") || string.IsNullOrWhiteSpace(page.Image))
             throw new LauncherException("자동 입력 방지 화면을 읽지 못했습니다. 다시 불러와 주세요.");
         var imageUri = new Uri(client.BaseAddress!, page.Image);
@@ -71,9 +77,7 @@ public sealed class ActozAuthenticationClient : IDisposable
     public async Task<LauncherSession> LoginNaverAsync(NaverLoginIdentity identity, CancellationToken cancellationToken = default,
         Func<string?, CancellationToken, Task<string?>>? requestOtp = null, IEnumerable<Cookie>? browserCookies = null)
     {
-        ClearPendingSession();
-        form?.Clear();
-        form = null;
+        ResetAuthentication();
         if (string.IsNullOrWhiteSpace(identity.MemberId) || identity.MemberId.Length > 1024 || identity.MemberId.Any(char.IsControl))
             throw new LauncherException("네이버 로그인 정보를 확인하지 못했습니다. 다시 로그인해 주세요.");
         if (browserCookies is not null && cookieJar is not null)
@@ -102,8 +106,10 @@ public sealed class ActozAuthenticationClient : IDisposable
         var fields = form ?? throw new LauncherException("로그인 화면을 먼저 불러와 주세요.");
         form = null;
         userName = userName.Trim();
-        if (userName.Length == 0 || password.Length == 0 || captcha.Trim().Length != 5)
-            throw new LauncherException("아이디, 비밀번호와 5자리 자동 입력 방지 문자를 입력해 주세요.");
+        if (userName.Length == 0 || password.Length == 0)
+            throw new LauncherException("아이디와 비밀번호를 입력해 주세요.");
+        if (captcha.Trim().Length is not (0 or 5))
+            throw new LauncherException("자동 입력 방지 문자는 표시된 5자리를 입력해 주세요.", "CAPTCHA");
         fields["gameServiceID"] = "34";
         fields["csiteNo"] = "0";
         fields["memberID"] = userName;
@@ -132,7 +138,7 @@ public sealed class ActozAuthenticationClient : IDisposable
                 throw new LauncherException("현재 IP에서 로그인할 수 없습니다. 공식 홈페이지의 계정 설정을 확인해 주세요.");
             var memberKey = Read(data, "memberKey");
             var channel = Read(data, "csiteNo");
-            if (string.IsNullOrEmpty(memberKey) || !string.IsNullOrEmpty(channel) && channel != ((int)provider).ToString())
+            if (!string.IsNullOrEmpty(channel) && channel != ((int)provider).ToString())
                 throw new LauncherException("선택한 로그인 방식과 서버의 로그인 정보가 다릅니다. 다시 로그인해 주세요.");
             var returnedUser = Read(data, "memberID");
             if (!string.IsNullOrWhiteSpace(returnedUser) && !string.Equals(returnedUser, userName, StringComparison.OrdinalIgnoreCase))
@@ -140,22 +146,16 @@ public sealed class ActozAuthenticationClient : IDisposable
             var patchOnly = Read(data, "pathcheck") == "1";
             if (Read(data, "systemCheck") == "O" && !patchOnly)
                 throw new LauncherException("서버 점검 중입니다. 점검 종료 후 다시 시도해 주세요.", "MAINTENANCE");
-            fields["memberKey"] = memberKey;
-            fields["InternetCafeType"] = "0";
-            fields["hid_freeTrial"] = Read(data, "freeTrial") ?? "X";
-            fields["hid_freeTrialRemainDate"] = Read(data, "freeTrialRemainDate") ?? "0";
+            fields["memberKey"] = memberKey ?? "";
             fields["passWord"] = "";
-            fields["motpID"] = Read(data, "motpID") ?? "";
-            fields["hidMemberID"] = Read(data, "encMemberID") ?? "";
-            if (Read(data, "motpUse") == "O")
+            var usesOtp = Read(data, "motpUse") == "O";
+            if (usesOtp)
                 await CompleteOtpAsync(fields, requestOtp, cancellationToken);
-            if (patchOnly)
-            {
-                var session = new LauncherSession { UserName = userName, Provider = provider, IsPatchOnly = true, IssuedAtUtc = DateTimeOffset.UtcNow };
-                pendingSession = (session, new Dictionary<string, string>(fields, StringComparer.Ordinal));
-                return session;
-            }
-            return await IssueTokenAsync(userName, provider, fields, cancellationToken);
+            authenticatedUserName = userName;
+            authenticatedProvider = provider;
+            registrationMemberKey = provider == LoginProvider.Actoz && usesOtp ? memberKey : null;
+            if (patchOnly) return PatchSession();
+            return await IssueTokenAsync(userName, provider, cancellationToken);
         }
         finally
         {
@@ -165,24 +165,35 @@ public sealed class ActozAuthenticationClient : IDisposable
 
     public void ClearPendingSession()
     {
-        pendingSession?.Fields.Clear();
-        pendingSession = null;
+        authenticatedUserName = null;
+        issuedSession = null;
+        registrationMemberKey = null;
+        accessToken = "";
     }
+
+    public void ResetAuthentication()
+    {
+        ClearPendingSession();
+        form?.Clear();
+        form = null;
+        if (cookieJar is not null)
+            foreach (Cookie cookie in cookieJar.GetAllCookies()) cookie.Expired = true;
+    }
+
+    private LauncherSession PatchSession() => new()
+    {
+        UserName = authenticatedUserName!, Provider = authenticatedProvider,
+        IsPatchOnly = true, IssuedAtUtc = DateTimeOffset.UtcNow,
+    };
 
     public async Task<LauncherSession> RefreshSessionAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var pending = pendingSession ?? throw new LauncherException("현재 로그인 인증 정보가 없습니다. 새로 로그인해 주세요.", "SESSION_EXPIRED");
-        try
-        {
-            var session = await IssueTokenAsync(pending.Session.UserName, pending.Session.Provider, pending.Fields, cancellationToken);
-            ClearPendingSession();
-            return session;
-        }
-        catch (LauncherException error) when (error.Code == "-909")
-        {
-            return pending.Session;
-        }
+        if (issuedSession is not null) return issuedSession;
+        if (authenticatedUserName is null)
+            throw new LauncherException("현재 로그인 인증 정보가 없습니다. 새로 로그인해 주세요.", "SESSION_EXPIRED");
+        try { return await IssueTokenAsync(authenticatedUserName, authenticatedProvider, cancellationToken); }
+        catch (LauncherException error) when (error.Code == "-909") { return PatchSession(); }
         catch (LauncherException)
         {
             ClearPendingSession();
@@ -195,9 +206,119 @@ public sealed class ActozAuthenticationClient : IDisposable
         }
     }
 
-    private async Task<LauncherSession> IssueTokenAsync(string userName, LoginProvider provider, Dictionary<string, string> fields, CancellationToken cancellationToken)
+    public async Task<LauncherSession> LoginAutomaticallyAsync(string userName, AutoLoginCredentials credentials,
+        CancellationToken cancellationToken = default, bool checkPage = true)
     {
-        using var tokenReply = await PostAsync("LauncherFF/MakeToken", fields, cancellationToken);
+        if (string.IsNullOrWhiteSpace(userName) || !credentials.IsValid)
+            throw new LauncherException("저장된 자동 로그인 정보를 확인하지 못했습니다. 다시 로그인해 주세요.", "-99");
+        ResetAuthentication();
+        _ = await ReadLoginPageAsync(cancellationToken);
+        using var reply = await PostAsync("LauncherFF/AutoLoginProcess", new()
+        {
+            ["accessToken"] = credentials.AccessToken, ["launcherID"] = credentials.LauncherId,
+            ["deviceID"] = credentials.DeviceId, ["checkPage"] = checkPage ? "true" : "false",
+        }, cancellationToken);
+        var code = Read(reply.RootElement, "ResultCode");
+        if (code != "0") throw AutomaticLoginError(code);
+        var patchOnly = Read(reply.RootElement, "PathCheck") == "1";
+        if (Read(reply.RootElement, "SystemCheck") == "O" && !patchOnly)
+            throw new LauncherException("서버 점검 중입니다. 점검 종료 후 다시 시도해 주세요.", "MAINTENANCE");
+        authenticatedUserName = userName;
+        authenticatedProvider = LoginProvider.Actoz;
+        accessToken = credentials.AccessToken;
+        if (patchOnly) return PatchSession();
+        return await IssueTokenAsync(userName, LoginProvider.Actoz, cancellationToken);
+    }
+
+    public async Task<AutoLoginCredentials> RegisterAutomaticLoginAsync(string launcherId, string deviceId,
+        string environmentName, string otp, CancellationToken cancellationToken = default)
+    {
+        if (!CanRegisterAutomaticLogin || authenticatedUserName is null)
+            throw new LauncherException("U-OTP를 사용하는 액토즈 계정으로 먼저 로그인해 주세요.", "OTP");
+        ValidateFreshOtp(otp);
+        environmentName = environmentName.Trim();
+        if (environmentName.Length is < 1 or > 50 || environmentName.Any(char.IsControl) ||
+            !Guid.TryParseExact(launcherId, "D", out _) || deviceId.Length != 32 || !deviceId.All(Uri.IsHexDigit))
+            throw new LauncherException("등록할 환경 이름과 기기 정보를 확인해 주세요.");
+        using var reply = await PostAsync("LauncherFF/SaveDevice", new()
+        {
+            ["launcherID"] = launcherId, ["deviceID"] = deviceId, ["deviceDesc"] = environmentName,
+            ["otpNum"] = otp, ["memberKey"] = registrationMemberKey!, ["os"] = RuntimeInformation.OSDescription,
+        }, cancellationToken);
+        var code = Read(reply.RootElement, "ResultCode");
+        if (code != "0") throw new LauncherException("자동 로그인 환경을 등록하지 못했습니다. 새 U-OTP 번호와 계정 상태를 확인해 주세요.", code);
+        var credentials = new AutoLoginCredentials
+        {
+            LauncherId = launcherId, DeviceId = deviceId, EnvironmentName = environmentName,
+            AccessToken = Read(reply.RootElement, "Result") ?? "",
+        };
+        if (!credentials.IsValid) throw new LauncherException("자동 로그인 등록 응답을 확인하지 못했습니다.");
+        accessToken = credentials.AccessToken;
+        return credentials;
+    }
+
+    private static void ValidateFreshOtp(string otp)
+    {
+        if (otp.Length != 7 || !otp.All(char.IsAsciiDigit))
+            throw new LauncherException("새 U-OTP 인증번호 7자리를 입력해 주세요.", "OTP");
+    }
+
+    private async Task<string> GetCurrentRegistrationIdAsync(AutoLoginCredentials credentials, CancellationToken cancellationToken)
+    {
+        if (!credentials.IsValid) throw new LauncherException("자동 로그인 정보를 확인하지 못했습니다.");
+        using var devices = await PostAsync("LauncherFF/GetDevice", new() { ["accessToken"] = credentials.AccessToken }, cancellationToken);
+        var code = Read(devices.RootElement, "ResultCode");
+        if (code != "0") throw AutomaticLoginError(code);
+        if (!devices.RootElement.TryGetProperty("Result", out var items) || items.ValueKind != JsonValueKind.Array)
+            throw new LauncherException("등록된 자동 로그인 환경 목록을 확인하지 못했습니다.");
+        var current = items.EnumerateArray().Where(x => string.Equals(Read(x, "IsCurEnv"), "true", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (current.Length != 1 || string.IsNullOrWhiteSpace(Read(current[0], "AutoLoginID")))
+            throw new LauncherException("현재 기기의 자동 로그인 등록을 확인하지 못했습니다. 공식 홈페이지에서 환경을 확인해 주세요.");
+        return Read(current[0], "AutoLoginID")!;
+    }
+
+    public async Task RenewAutomaticLoginAsync(AutoLoginCredentials credentials, string otp, CancellationToken cancellationToken = default)
+    {
+        ValidateFreshOtp(otp);
+        var registrationId = await GetCurrentRegistrationIdAsync(credentials, cancellationToken);
+        using var reply = await PostAsync("LauncherFF/UdateDeviceExpireDate", new()
+        {
+            ["otpNum"] = otp, ["accessToken"] = credentials.AccessToken, ["autoLoginID"] = registrationId,
+        }, cancellationToken);
+        var code = Read(reply.RootElement, "ResultCode");
+        if (code != "0")
+            throw new LauncherException("자동 로그인 유효기간을 갱신하지 못했습니다. 새 U-OTP 번호와 등록 상태를 확인해 주세요.", code);
+    }
+
+    public async Task UnregisterAutomaticLoginAsync(AutoLoginCredentials credentials, CancellationToken cancellationToken = default)
+    {
+        var registrationId = await GetCurrentRegistrationIdAsync(credentials, cancellationToken);
+        using var reply = await PostAsync("LauncherFF/DelDevice", new()
+        {
+            ["accessToken"] = credentials.AccessToken, ["autoLoginID"] = registrationId,
+        }, cancellationToken);
+        var code = Read(reply.RootElement, "ResultCode");
+        if (code != "0") throw new LauncherException("자동 로그인 등록을 해제하지 못했습니다. 잠시 후 다시 시도해 주세요.", code);
+        ResetAuthentication();
+    }
+
+    public static bool IsInvalidAutomaticLogin(string? code) => code is "-97" or "-96" or "-95" or "-94" or "-93" or "-92" or "-91" or "-99";
+
+    private static LauncherException AutomaticLoginError(string? code) => code switch
+    {
+        "-999" => new("서버 점검 중입니다. 점검 종료 후 다시 시도해 주세요.", "MAINTENANCE"),
+        "-98" => new("자동 로그인이 로그아웃 상태입니다. 자동 로그인 버튼을 눌러 다시 접속해 주세요.", code),
+        "-90" => new("현재 IP에서는 자동 로그인할 수 없습니다. 공식 홈페이지의 계정 설정을 확인해 주세요.", code),
+        _ when IsInvalidAutomaticLogin(code) => new("자동 로그인 등록이 만료되거나 해제되었습니다. 다시 로그인한 뒤 등록해 주세요.", code),
+        _ => new("자동 로그인하지 못했습니다. 잠시 후 다시 시도하거나 새로 로그인해 주세요.", code),
+    };
+
+    private async Task<LauncherSession> IssueTokenAsync(string userName, LoginProvider provider, CancellationToken cancellationToken)
+    {
+        using var tokenReply = await PostAsync("LauncherFF/MakeToken", new Dictionary<string, string>
+        {
+            ["internetCafeType"] = "0", ["freeTrialSelect"] = "0", ["accessToken"] = accessToken,
+        }, cancellationToken);
         var tokenResult = Read(tokenReply.RootElement, "tokenResult");
         if (tokenResult != "0")
             throw TokenError(tokenResult);
@@ -207,25 +328,25 @@ public sealed class ActozAuthenticationClient : IDisposable
         var token = Read(tokenReply.RootElement, "toKen");
         if (!LauncherSession.HasValidTokenFormat(token))
             throw new LauncherException("게임 세션을 확인하지 못했습니다. 다시 로그인해 주세요.");
-        return new LauncherSession { UserName = userName, Provider = provider, Token = token, IssuedAtUtc = DateTimeOffset.UtcNow };
+        return issuedSession = new LauncherSession { UserName = userName, Provider = provider, Token = token, IssuedAtUtc = DateTimeOffset.UtcNow };
     }
 
     private async Task CompleteOtpAsync(Dictionary<string, string> login, Func<string?, CancellationToken, Task<string?>>? requestOtp,
         CancellationToken cancellationToken)
     {
         if (requestOtp is null) throw new LauncherException("OTP 인증이 필요한 계정입니다.", "OTP");
-        if (string.IsNullOrWhiteSpace(login["motpID"])) throw new LauncherException("OTP 인증 정보를 확인하지 못했습니다. 다시 로그인해 주세요.");
+        if (string.IsNullOrWhiteSpace(login["memberKey"])) throw new LauncherException("OTP 인증 정보를 확인하지 못했습니다. 다시 로그인해 주세요.", "OTP");
         string? message = null;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var code = await requestOtp(message, cancellationToken);
             if (code is null) throw new LauncherException("OTP 인증을 취소했습니다.", "CANCELED");
-            if (code.Length is < 6 or > 8 || code.Any(c => c is < '0' or > '9'))
-                throw new LauncherException("OTP 인증번호는 숫자 6~8자리로 입력해 주세요.", "OTP");
+            if (code.Length != 7 || !code.All(char.IsAsciiDigit))
+                throw new LauncherException("U-OTP 인증번호 7자리를 입력해 주세요.", "OTP");
             var fields = new Dictionary<string, string>
             {
-                ["motpID"] = login["motpID"], ["memberKey"] = login["memberKey"], ["memberID"] = login["memberID"],
+                ["memberKey"] = login["memberKey"], ["memberID"] = login["memberID"],
                 ["csiteNo"] = login["csiteNo"], ["otpNum"] = code,
             };
             try
@@ -233,7 +354,7 @@ public sealed class ActozAuthenticationClient : IDisposable
                 using var response = await PostAsync("LauncherFF/OTPCheck", fields, cancellationToken);
                 var result = Read(response.RootElement, "Result");
                 if (result is null) throw new LauncherException("OTP 서버 응답을 확인하지 못했습니다. 다시 로그인해 주세요.");
-                if (result.Length == 0) { login["otpNum"] = code; return; }
+                if (result.Length == 0) return;
                 message = "OTP 인증번호가 올바르지 않거나 만료되었습니다. 새 번호를 입력해 주세요.";
             }
             finally { fields.Clear(); }
@@ -285,15 +406,15 @@ public sealed class ActozAuthenticationClient : IDisposable
     private static LauncherException TokenError(string? code) => code switch
     {
         "-909" => new("서버 점검 중입니다. 점검 종료 후 다시 로그인해 주세요.", code),
-        "-401" => new("로그인 키가 만료되었습니다. 다시 로그인해 주세요.", code),
+        "-401" or "-402" or "-403" or "-404" or "-405" => new("로그인 인증이 만료되었습니다. 다시 로그인해 주세요.", code),
+        _ when IsInvalidAutomaticLogin(code) => AutomaticLoginError(code),
         "601" => new("게임 인증에 실패했습니다. 다시 로그인해 주세요.", code),
         _ => new("게임 세션을 발급받지 못했습니다. 계정 이용 상태와 서버 상태를 확인해 주세요.")
     };
 
     public void Dispose()
     {
-        ClearPendingSession();
-        form?.Clear();
+        ResetAuthentication();
         if (ownsClient) client.Dispose();
     }
 }

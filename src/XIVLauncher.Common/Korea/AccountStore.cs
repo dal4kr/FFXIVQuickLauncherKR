@@ -16,7 +16,7 @@ public sealed class AccountStore(string path)
         {
             plaintext = ProtectedData.Unprotect(File.ReadAllBytes(path), Entropy, DataProtectionScope.CurrentUser);
             var accounts = JsonSerializer.Deserialize<List<StoredAccount>>(plaintext);
-            if (accounts is null || accounts.Any(x => string.IsNullOrWhiteSpace(x.UserName) || x.Token is null || !Enum.IsDefined(x.Provider)))
+            if (accounts is null || accounts.Any(x => string.IsNullOrWhiteSpace(x.UserName) || x.Token is null || !Enum.IsDefined(x.Provider) || x.AutomaticLogin is not null && (x.Provider != LoginProvider.Actoz || !x.AutomaticLogin.IsValid)))
                 throw new JsonException();
             using var document = JsonDocument.Parse(plaintext);
             if (document.RootElement.EnumerateArray().Any(x => x.TryGetProperty("Cookies", out _) || x.TryGetProperty("MemberKey", out _)))
@@ -32,7 +32,8 @@ public sealed class AccountStore(string path)
 
     public void Save(StoredAccount account)
     {
-        if (string.IsNullOrWhiteSpace(account.UserName) || !Enum.IsDefined(account.Provider))
+        if (string.IsNullOrWhiteSpace(account.UserName) || !Enum.IsDefined(account.Provider) ||
+            account.AutomaticLogin is not null && (account.Provider != LoginProvider.Actoz || !account.AutomaticLogin.IsValid))
             throw new LauncherException("저장할 계정 이름이 없습니다. 다시 로그인해 주세요.");
         var accounts = LoadAll().ToList();
         accounts.RemoveAll(x => x.Provider == account.Provider && string.Equals(x.UserName, account.UserName, StringComparison.OrdinalIgnoreCase));

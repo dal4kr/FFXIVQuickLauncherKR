@@ -18,7 +18,7 @@ public sealed class LauncherSession
     public override string ToString() => $"{UserName} ({IssuedAtUtc:O})";
 }
 
-public sealed record LoginChallenge(byte[] CaptchaImage);
+public sealed record LoginChallenge(byte[]? CaptchaImage);
 
 public sealed class LauncherException(string message, string? code = null) : Exception(message)
 {

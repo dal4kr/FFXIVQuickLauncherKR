@@ -9,14 +9,15 @@ public sealed class StoredAccount
     [JsonIgnore] public string DisplayName => $"{UserName} · {(Provider == LoginProvider.Naver ? "네이버" : "액토즈")}";
     public string Token { get; init; } = "";
     public DateTimeOffset IssuedAtUtc { get; init; }
+    public AutoLoginCredentials? AutomaticLogin { get; init; }
 
-    public static StoredAccount FromSession(LauncherSession session)
+    public static StoredAccount FromSession(LauncherSession session, AutoLoginCredentials? automaticLogin = null)
     {
         if (session.IsPatchOnly)
             throw new LauncherException("사전 패치 로그인은 게임 SID가 없어 저장할 수 없습니다.", "PREPATCH");
         return new StoredAccount
         {
-            UserName = session.UserName, Provider = session.Provider, Token = session.Token, IssuedAtUtc = session.IssuedAtUtc
+            UserName = session.UserName, Provider = session.Provider, Token = session.Token, IssuedAtUtc = session.IssuedAtUtc, AutomaticLogin = automaticLogin
         };
     }
 

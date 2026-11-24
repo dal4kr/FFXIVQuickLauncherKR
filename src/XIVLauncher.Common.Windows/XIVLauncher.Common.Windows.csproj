@@ -2,6 +2,7 @@
   <PropertyGroup><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
   <ItemGroup>
     <Compile Include="NativeAclFix.cs" />
+    <Compile Include="AutoLoginDevice.cs" />
     <Compile Include="WindowsGameRunner.cs" />
     <Compile Include="KrDalamudGameRunner.cs" />
     <PackageReference Include="Serilog" />

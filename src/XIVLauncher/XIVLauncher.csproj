@@ -4,7 +4,7 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>FFXIVLauncherKR</AssemblyName>
     <Product>FFXIVLauncherKR</Product>
-    <Version>0.2.1</Version>
+    <Version>0.3.1</Version>
     <StartupObject>XIVLauncher.Program</StartupObject>
     <EnableDefaultItems>false</EnableDefaultItems>
     <ApplicationIcon>Resources/dalamud_icon.ico</ApplicationIcon>
@@ -21,6 +21,7 @@
     <Compile Include="Windows/MainWindow.xaml.cs" />
     <Compile Include="Windows/NaverLoginWindow.cs" />
     <Compile Include="Windows/OtpWindow.cs" />
+    <Compile Include="Windows/AutoLoginWindow.cs" />
     <Resource Include="Resources/dalamud_icon.ico" />
     <None Include="../../LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
     <EmbeddedResource Include="../../LICENSE" LogicalName="FFXIVLauncherKR.LICENSE" />
